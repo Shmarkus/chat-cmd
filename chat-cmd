@@ -1,0 +1,128 @@
+#!/bin/bash
+########################################################################################################################
+# This script is a simple chat client for the OpenAI GPT API. It allows you to have a conversation with the GPT model using the chat endpoint.
+# The script stores the conversation context in a file so you can continue the conversation later.
+# The script uses the `jq` command to parse the JSON response from the API.
+# The script uses the `rich` command to display the conversation in a nice format.
+########################################################################################################################
+
+########### Connection config ##########################################################################################
+# OpenAI API URL for the chat endpoint
+API_URL="https://path-to-api"
+# Your OpenAI API key
+API_KEY="api-key"
+########################################################################################################################
+
+
+########### Display config #############################################################################################
+# Display name for you
+YOU_NAME=You
+# Display name for GPT
+SYSTEM_NAME=GPT
+# Define some colors to separate the requests and responses better
+RED_COLOR="\e[31m"
+GREEN_COLOR="\e[32m"
+END_COLOR="\e[0m"
+
+# Assign colors to participants
+YOU_COLOR=$GREEN_COLOR
+SYSTEM_COLOR=$RED_COLOR
+########################################################################################################################
+
+########### Chat config ################################################################################################
+# Default System message, unless provided as second argument on the command line
+SYSTEM_CMD=${2:-"You are a helpful AI assistant. You can have opinionated answers but state this clearly when something is opinionated. If you dont have good info on some subject matter then just respond that you dont have sufficient info on the subject matter. Never mention that youre an AI. Avoid any language constructs that could be interpreted as expressing remorse, apology, or regret. Refrain from disclaimers about you not being a professional or expert. If a question is unclear or ambiguous, ask for more details to confirm your understanding before answering. If events or information are beyond your scope or knowledge cutoff date, provide a response stating that you dont know without elaborating on why the information is unavailable. Do not try to relate responses to my line of work and passion for technology when its not applicable. When my proposed idea does not seem good, dont agree but say that its not a good idea followed with reasoning."}
+
+# File to store conversation context, defaults to chat_context but can be over-written with first argument on the command line to create different chat contexts
+FILE_NAME=${1:-"chat_context"}
+# Location to store chat context
+CONTEXT_DIR="$HOME/.chat-cmd"
+CONTEXT="$CONTEXT_DIR/$FILE_NAME"
+
+#### API ####
+
+# The maximum number of tokens to generate in the completion. The token count of your prompt plus max_tokens can't exceed the model's context length. Most models have a context length of 2048 tokens (except for the newest models, which support 4096). Default 16
+MAX_TOKENS=800
+# What sampling temperature to use, between 0 and 2. Higher values mean the model takes more risks. Try 0.9 for more creative applications, and 0 (argmax sampling) for ones with a well-defined answer. We generally recommend altering this or top_p but not both. Default 1
+TEMPERATURE=0.7
+# Number between -2.0 and 2.0. Positive values penalize new tokens based on their existing frequency in the text so far, decreasing the model's likelihood to repeat the same line verbatim. Default 0
+FREQUENCY_PENALTY=0
+# Number between -2.0 and 2.0. Positive values penalize new tokens based on whether they appear in the text so far, increasing the model's likelihood to talk about new topics. Default 0
+PRESENCE_PENALTY=0
+# An alternative to sampling with temperature, called nucleus sampling, where the model considers the results of the tokens with top_p probability mass. So 0.1 means only the tokens comprising the top 10% probability mass are considered. We generally recommend altering this or temperature but not both. Default 1
+TOP_P=0.95
+# Up to four sequences where the API will stop generating further tokens. The returned text won't contain the stop sequence. For GPT-4 Turbo with Vision, up to two sequences are supported. Default null
+STOP=null
+########################################################################################################################
+
+
+#### Main logic ########################################################################################################
+
+# Template function to store interaction in a memory file
+function msg_template() {
+  local role=$1
+  local content=$2
+  echo "{\"role\":\"$role\",\"content\":$content}"
+}
+
+# Check if context file exists, if not, create it with initial system message
+if [ ! -f "$CONTEXT" ]; then
+    init=$(msg_template "system" "\"$SYSTEM_CMD\"")
+    echo "$init" > "$CONTEXT"
+fi
+
+# Function to send a request to the GPT chat endpoint
+function query_gpt() {
+    local prompt=$1
+    local history
+    # append prompt with msg_template to context file prefixed by comma so the context file is a valid json array
+    echo ",$(msg_template "user" "\"$prompt\"")" >> "$CONTEXT"
+
+    response=$(curl -s -X POST "$API_URL" \
+        -H "api-key: $API_KEY" \
+        -H "Content-Type: application/json" \
+        -d '{
+          "messages": '["$(cat "$CONTEXT")"]',
+          "max_tokens": '"$MAX_TOKENS"',
+          "temperature": '"$TEMPERATURE"',
+          "frequency_penalty": '"$FREQUENCY_PENALTY"',
+          "presence_penalty": '"$PRESENCE_PENALTY"',
+          "top_p": '"$TOP_P"',
+          "stop": '"$STOP"'
+        }')
+
+    # Check if the response contains an error
+    error=$( echo "$response" | jq -r '.error.message' )
+    if [ "$error" != "null" ]; then
+        echo "$response" | jq -r '.error.message'
+        exit 1
+    fi
+
+    # Store the response in the context file
+    history=$( echo "$response" | jq '.choices[0].message.content' )
+    echo ",$(msg_template "assistant" "$history")" >> "$CONTEXT"
+
+    # Return the response
+    echo "$response" | jq -r '.choices[0].message.content' | rich - --markdown --force-terminal
+}
+
+echo "Welcome to the chat! Type 'quit' to exit the chat."
+# Main loop for the chat
+while true; do
+    echo -n -e "${YOU_COLOR}${YOU_NAME}:${END_COLOR} "
+    read user_input
+
+    # Exit condition
+    if [[ $user_input == "quit" ]]; then
+        echo "Have a good day! Remember, we can continue this conversation later just use $FILE_NAME as the first argument to pick up where we left off."
+        break
+    fi
+
+    # Query GPT and display the response
+    response=$(query_gpt "$user_input")
+    if [ $? -ne 0 ]; then
+      echo -e "${RED_COLOR}Failed to query GPT API: ${END_COLOR} $response"
+      exit 1
+    fi
+    echo -e "${SYSTEM_COLOR}${SYSTEM_NAME}:${END_COLOR} $response"
+done
